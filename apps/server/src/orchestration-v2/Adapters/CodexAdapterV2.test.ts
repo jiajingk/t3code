@@ -3216,159 +3216,198 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
-  it.effect("preserves T3 context on the wire and restores it after compaction", () =>
-    Effect.gen(function* () {
-      const nativeThreadId = "context-thread";
-      const nativeTurnId = "context-turn";
-      // An explicit Standard must reach Codex, or Codex falls back to Daybreak.
-      const modelSelection = {
-        ...CODEX_TEST_MODEL_SELECTION,
-        options: [{ id: "cyberAccessProgram", value: "standard" }],
-      };
-      const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
-        nativeThreadId,
-        codexInput: [{ type: "text", text: "work" }],
-        runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
-        modelSelection,
-        hasT3Mcp: true,
-        cyberAccess: { defaultProgram: "daybreakBlue" },
-      });
-      assert.include(
-        params.additionalContext?.t3_code_orchestration_01?.value ?? "",
-        "delegate_task",
-      );
-      const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
-      const transcript = makeCodexReplayTranscript({
-        scenario: "restore-context",
-        entries: [
-          ...entries.slice(0, 5),
-          {
-            type: "expect_outbound",
-            label: "context turn",
-            frame: { id: 3, method: "turn/start", params },
-          },
-          ...entries.slice(6),
-          {
-            type: "emit_inbound",
-            label: "compacted",
-            frame: {
-              method: "item/completed",
-              params: {
-                threadId: nativeThreadId,
-                turnId: nativeTurnId,
-                item: { type: "contextCompaction", id: "compact-context" },
-              },
+  it.effect.each([false, true])(
+    "preserves T3 context on the wire and after compaction (resumed: %s)",
+    (resume) =>
+      Effect.gen(function* () {
+        const nativeThreadId = "context-thread";
+        const nativeTurnId = "context-turn";
+        // An explicit Standard must reach Codex, or Codex falls back to Daybreak.
+        const modelSelection = {
+          ...CODEX_TEST_MODEL_SELECTION,
+          options: [{ id: "cyberAccessProgram", value: "standard" }],
+        };
+        const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId,
+          codexInput: [{ type: "text", text: "work" }],
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          modelSelection,
+          hasT3Mcp: true,
+          cyberAccess: { defaultProgram: "daybreakBlue" },
+        });
+        assert.include(
+          params.additionalContext?.t3_code_orchestration_01?.value ?? "",
+          "Explicit platform choice takes precedence",
+        );
+        for (const entry of Object.values(params.additionalContext ?? {})) {
+          assert.isAtMost(Buffer.byteLength(entry.value, "utf8"), 4_000);
+        }
+        const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+        const transcript = makeCodexReplayTranscript({
+          scenario: "restore-context",
+          entries: [
+            ...entries.slice(0, 5),
+            ...(resume
+              ? [
+                  {
+                    type: "expect_outbound" as const,
+                    label: "resume context thread",
+                    frame: {
+                      id: 3,
+                      method: "thread/resume",
+                      params: {
+                        threadId: nativeThreadId,
+                        excludeTurns: true,
+                        config: CodexAdapterV2.CODEX_THREAD_CONFIG,
+                      },
+                    },
+                  },
+                  {
+                    type: "emit_inbound" as const,
+                    label: "resumed context thread",
+                    frame: {
+                      id: 3,
+                      result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } },
+                    },
+                  },
+                ]
+              : []),
+            {
+              type: "expect_outbound",
+              label: "context turn",
+              frame: { id: resume ? 4 : 3, method: "turn/start", params },
             },
-          },
-          {
-            type: "emit_inbound",
-            label: "done",
-            frame: {
-              method: "turn/completed",
-              params: {
-                threadId: nativeThreadId,
-                turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
-              },
-            },
-          },
-          {
-            type: "expect_outbound",
-            label: "restore context",
-            frame: {
-              id: 4,
-              method: "thread/inject_items",
-              params: {
-                threadId: nativeThreadId,
-                items: Object.entries(params.additionalContext ?? {}).map(([key, entry]) => ({
-                  type: "message",
-                  role: "developer",
-                  content: [{ type: "input_text", text: `<${key}>${entry.value}</${key}>` }],
-                })),
-              },
-            },
-          },
-          { type: "emit_inbound", label: "restored", frame: { id: 4, result: {} } },
-        ],
-      });
-      // Codex queues items injected mid-turn as pending input and samples again.
-      const wireOrder: Array<string> = [];
-      const restoreRequested = yield* Deferred.make<void>();
-      const harness = yield* makeCodexReplayHarness(
-        transcript,
-        undefined,
-        (method) =>
-          method === "thread/inject_items"
-            ? Effect.sync(() => wireOrder.push(method)).pipe(
-                Effect.andThen(Deferred.succeed(restoreRequested, undefined)),
-              )
-            : Effect.void,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        (method) =>
-          Effect.sync(() => {
-            if (method === "item/completed" || method === "turn/completed") wireOrder.push(method);
-          }),
-        Effect.succeed<ReadonlyArray<ServerProviderModel>>([
-          {
-            slug: modelSelection.model,
-            name: modelSelection.model,
-            isCustom: false,
-            capabilities: {
-              optionDescriptors: [
-                {
-                  id: "cyberAccessProgram",
-                  label: "Cyber Access",
-                  type: "select",
-                  options: [
-                    { id: "standard", label: "Standard" },
-                    { id: "daybreakBlue", label: "Daybreak Blue", isDefault: true },
-                  ],
-                  currentValue: "daybreakBlue",
+            withReplayRequestId(entries[6]!, resume ? 4 : 3),
+            ...entries.slice(7),
+            {
+              type: "emit_inbound",
+              label: "compacted",
+              frame: {
+                method: "item/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  item: { type: "contextCompaction", id: "compact-context" },
                 },
-              ],
+              },
             },
-          },
-        ]),
-      );
-      yield* (yield* McpProviderSessions.McpProviderSessions).set({
-        environmentId: EnvironmentId.make("test"),
-        threadId: harness.threadId,
-        providerSessionId: "context-session",
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        endpoint: "http://127.0.0.1:43123/mcp",
-        authorizationHeader: "Bearer test",
-        browserToolsAvailable: true,
-      });
-      yield* harness.runtime.startTurn({
-        ...makeCodexTestTurnInput({
+            {
+              type: "emit_inbound",
+              label: "done",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "restore context",
+              frame: {
+                id: resume ? 5 : 4,
+                method: "thread/inject_items",
+                params: {
+                  threadId: nativeThreadId,
+                  items: Object.entries(params.additionalContext ?? {}).map(([key, entry]) => ({
+                    type: "message",
+                    role: "developer",
+                    content: [{ type: "input_text", text: `<${key}>${entry.value}</${key}>` }],
+                  })),
+                },
+              },
+            },
+            { type: "emit_inbound", label: "restored", frame: { id: resume ? 5 : 4, result: {} } },
+          ],
+        });
+        // Codex queues items injected mid-turn as pending input and samples again.
+        const wireOrder: Array<string> = [];
+        const restoreRequested = yield* Deferred.make<void>();
+        const harness = yield* makeCodexReplayHarness(
+          transcript,
+          undefined,
+          (method) =>
+            method === "thread/inject_items"
+              ? Effect.sync(() => wireOrder.push(method)).pipe(
+                  Effect.andThen(Deferred.succeed(restoreRequested, undefined)),
+                )
+              : Effect.void,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (method) =>
+            Effect.sync(() => {
+              if (method === "item/completed" || method === "turn/completed")
+                wireOrder.push(method);
+            }),
+          Effect.succeed<ReadonlyArray<ServerProviderModel>>([
+            {
+              slug: modelSelection.model,
+              name: modelSelection.model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "cyberAccessProgram",
+                    label: "Cyber Access",
+                    type: "select",
+                    options: [
+                      { id: "standard", label: "Standard" },
+                      { id: "daybreakBlue", label: "Daybreak Blue", isDefault: true },
+                    ],
+                    currentValue: "daybreakBlue",
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+        yield* (yield* McpProviderSessions.McpProviderSessions).set({
+          environmentId: EnvironmentId.make("test"),
           threadId: harness.threadId,
-          providerThread: harness.providerThread,
-          now: yield* DateTime.now,
-          attemptId: RunAttemptId.make("context-attempt"),
-          text: "work",
-        }),
-        modelSelection,
-      });
-      yield* harness.firstTerminal;
-      yield* Deferred.await(restoreRequested);
-      assert.equal(harness.terminalEvents()[0]?.status, "completed");
-      assert.deepEqual(
-        wireOrder,
-        ["item/completed", "turn/completed", "thread/inject_items"],
-        "restored T3 context while the compacting native turn was still running",
-      );
-    }).pipe(
-      Effect.provide(
-        Layer.mergeAll(
-          IdAllocator.layer,
-          McpProviderSessions.layer,
-          NodeServices.layer,
-          NodeCrypto.layer,
+          providerSessionId: "context-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer test",
+          browserToolsAvailable: true,
+        });
+        if (resume) {
+          yield* harness.runtime.resumeThread({
+            providerThread: harness.providerThread,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          });
+        }
+        yield* harness.runtime.startTurn({
+          ...makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("context-attempt"),
+            text: "work",
+          }),
+          modelSelection,
+        });
+        yield* harness.firstTerminal;
+        yield* Deferred.await(restoreRequested);
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+        assert.deepEqual(
+          wireOrder,
+          ["item/completed", "turn/completed", "thread/inject_items"],
+          "restored T3 context while the compacting native turn was still running",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
-    ),
   );
 
   it.effect("compacts Codex with the native RPC and completes the compaction turn", () =>
