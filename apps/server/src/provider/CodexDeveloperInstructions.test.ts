@@ -44,12 +44,15 @@ describe("Codex runtime context", () => {
 });
 
 describe("Codex orchestration context", () => {
-  it("routes subagents native first, delegate_task for the rest", () => {
+  it("honors explicit external platforms before the default T3 subagent routing", () => {
     const orchestration = Object.entries(buildCodexAdditionalContext({ model: "gpt-6.1-sol" }))
       .filter(([key]) => key.startsWith("t3_code_orchestration_"))
       .map(([, entry]) => entry.value)
       .join("\n");
 
+    NodeAssert.ok(orchestration.includes("Explicit platform choice takes precedence"));
+    NodeAssert.ok(orchestration.includes("Herdr"));
+    NodeAssert.ok(orchestration.includes("T3-managed subagents only"));
     NodeAssert.ok(orchestration.includes("use your native tool when the child uses your provider"));
     NodeAssert.ok(orchestration.includes("`run_in_background:false`"));
     NodeAssert.ok(orchestration.includes("A native type on another provider's model"));

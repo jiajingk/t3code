@@ -83,3 +83,26 @@ describe("T3 device instructions", () => {
     assert.notInclude(t3AcpPromptWithInstructions({ prompt: "Hi.", state }), "## T3 Code devices");
   });
 });
+
+describe("external orchestration routing", () => {
+  it("delivers the platform exception with T3 defaults through shared provider entry points", () => {
+    const state = { interactionMode: "default", hasT3Mcp: true, hasDeviceTools: false } as const;
+    const prompt = "Use Herdr for this task.";
+    const instructions = [
+      t3OrchestrationSystemPrompt(true, false),
+      t3OrchestrationPrompt({
+        prompt,
+        hasT3Mcp: true,
+        hasDeviceTools: false,
+        orchestrationDelivered: false,
+        deviceInstructionsDelivered: false,
+      }),
+      t3AcpPromptWithInstructions({ prompt, state }),
+    ];
+    for (const text of instructions) {
+      assert.include(text, "Explicit platform choice takes precedence");
+      assert.include(text, "T3-managed subagents only");
+      assert.include(text, "Never switch unasked");
+    }
+  });
+});
